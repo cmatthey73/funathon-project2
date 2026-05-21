@@ -162,7 +162,6 @@ offsets             = results["offset_mapping"][text_idx]
 word_ids            = results["word_ids"][text_idx]
 predicted_code = results["prediction"][text_idx][top_k_idx]
 
-# Average attention over heads, pick the row for the predicted class
 attributions  = results["captum_attributions"][text_idx][top_k_idx] # (seq_len,)
 
 words, word_attributions = map_attributions_to_word(

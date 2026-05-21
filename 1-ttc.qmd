@@ -14,7 +14,7 @@ execute:
 
 ## The problem: classifying free-text activity descriptions
 
-Given a short text description of a business activity — such as *"I sell croissants and pains au chocolat"* — the goal is to automatically assign the correct **NAF 2025 activity code** from hundreds of possible categories. This is a **supervised multiclass classification** problem.
+Given a short text description of a business activity — such as *"I sell croissants and pains au chocolat"* — the goal is to automatically assign the correct **NACE 2.1 activity code** from hundreds of possible categories. This is a **supervised multiclass classification** problem.
 
 ## Supervised learning or RAG?
 
@@ -30,6 +30,8 @@ In this notebook, we use the supervised approach: the model learns directly from
 ## Pipeline overview
 
 ```{mermaid}
+%%| eval: true
+%%| output: true
 flowchart LR
     A["Labelled data<br/>text + NAF code"] --> B["Split<br/>train / val / test"]
     B --> C["WordPiece Tokenizer<br/>text → token IDs"]

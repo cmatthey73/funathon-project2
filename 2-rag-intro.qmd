@@ -193,3 +193,7 @@ except KeyError:
 ```
 
 If `load_dotenv()` doesn't work but every thing seems fine, don't forget to make sure that Python runs in the right working directory with `os.getcwd()`and `os.chdir("funathon-project2)`.
+
+# Next Step
+
+Go To [**Tutorial 1 — Building the vector database**](2-rag-vdb)

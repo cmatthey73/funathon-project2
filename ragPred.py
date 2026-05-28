@@ -270,7 +270,62 @@ print(
 )
 
 
+from plotnine import (
+    ggplot, aes,
+    geom_boxplot, geom_line, geom_point,
+    scale_color_manual, scale_linetype_manual,
+    labs, theme_minimal,
+)
 
+
+# --- Left: confidence distribution by correctness ---
+results_plot = results.assign(
+    correctness=results["pipeline_correct"].map({False: "Incorrect", True: "Correct"})
+)
+
+p1 = (
+    ggplot(results_plot, aes(x="correctness", y="confidence"))
+    + geom_boxplot()
+    + labs(
+        title="Confidence distribution by pipeline correctness",
+        x="Prediction correct",
+        y="Confidence score",
+    )
+    + theme_minimal()
+)
+
+# --- Right: precision and coverage vs confidence threshold ---
+thresholds = [i / 10 for i in range(1, 10)]
+rows = []
+for t in thresholds:
+    subset = results[results["confidence"] >= t]
+    if len(subset) > 0:
+        rows += [
+            {"threshold": t, "metric": "Precision", "value": subset["pipeline_correct"].mean()},
+            {"threshold": t, "metric": "Coverage",  "value": len(subset) / len(results)},
+        ]
+
+df_thresh = pd.DataFrame(rows)
+
+p2 = (
+    ggplot(df_thresh, aes(x="threshold", y="value", color="metric", linetype="metric"))
+    + geom_line()
+    + geom_point()
+    + scale_color_manual(values={"Precision": "steelblue", "Coverage": "coral"})
+    + scale_linetype_manual(values={"Precision": "solid", "Coverage": "dashed"})
+    + labs(
+        title="Precision and coverage vs. confidence threshold",
+        x="Confidence threshold",
+        y="Value",
+        color="",
+        linetype="",
+    )
+    + theme_minimal()
+)
+
+from IPython.display import display
+display(p1)
+display(p2)
 
 
 

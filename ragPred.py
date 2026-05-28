@@ -99,3 +99,179 @@ response = client_llmlab.chat.completions.parse(
 llm_response: NaceClassificationResult = response.choices[0].message.parsed
 print(json.dumps(llm_response.model_dump(), indent=2))
 
+import duckdb
+
+con = duckdb.connect(database=":memory:")
+
+con.execute("INSTALL httpfs;")
+con.execute("LOAD httpfs;")
+
+query_definition = f"""
+SELECT *
+FROM read_parquet(
+  'https://minio.lab.sspcloud.fr/projet-formation/diffusion/funathon/2026/project2/generation_None_temp08.parquet'
+)
+USING SAMPLE {SAMPLE_SIZE}
+"""
+
+annotations = (
+    con.sql(query_definition)
+    .to_df()
+    .to_dict(orient="records")
+)
+print(f"Dataset loaded: {len(annotations)} rows")
+print(f"Keys: {list(annotations[0].keys())}")
+annotations[:2]
+
+def run_rag_pipeline(activity: str) -> dict:
+    """
+    Run the full RAG pipeline for a single activity label.
+
+    Parameters
+    ----------
+    activity : str
+        Free-text economic activity label to be coded.
+
+    Returns
+    -------
+    dict with keys:
+        - nace_code (str | None) : predicted NACE code
+        - codable (bool)        : True if the label could be coded
+        - confidence (float)    : confidence score (0–1)
+        - retrieved_codes (list): candidates returned by the retriever
+    """
+    # --- Step 1: Embedding ---
+    emb_response = client_llmlab.embeddings.create(model=EMB_MODEL_NAME, input=activity)
+    embedding = emb_response.data[0].embedding
+
+    # --- Step 2: Retrieval ---
+    points = client_qdrant.query_points(
+        collection_name=COLLECTION_NAME,
+        query=embedding,
+        limit=RETRIEVER_LIMIT,
+    )
+    descriptions_retrieved = []
+    codes_retrieved = []
+    for point in points.model_dump()["points"]:
+        descriptions_retrieved.append(point["payload"]["text"])
+        codes_retrieved.append(point["payload"]["code"])
+
+    # --- Step 3: Prompt construction ---
+    user_prompt = USER_PROMPT_TEMPLATE.format(
+        activity=activity,
+        proposed_nace_descriptions="## " + "\n\n## ".join(descriptions_retrieved),
+        proposed_nace_codes=", ".join(codes_retrieved),
+    )
+
+    # --- Step 4: LLM inference ---
+    gen_response = client_llmlab.chat.completions.parse(
+        model=GEN_MODEL_NAME,
+        messages=[
+            {"role": "system", "content": SYSTEM_PROMPT},
+            {"role": "user", "content": user_prompt},
+        ],
+        temperature=TEMPERATURE,
+        response_format=NaceClassificationResult,
+    )
+
+    result = gen_response.choices[0].message.parsed.model_dump()
+    # Keep retrieved candidates for retriever evaluation
+    result["retrieved_codes"] = codes_retrieved
+
+    return result
+
+from tqdm import tqdm
+import pandas as pd
+
+records = []
+
+for row in tqdm(annotations, total=len(annotations), desc="Coding"):
+    activity_label = row["label"]
+    true_code      = row["code"]
+
+    try:
+        pred = run_rag_pipeline(activity_label)
+    except Exception as e:
+        pred = {
+            "nace_code":       None,
+            "codable":        False,
+            "confidence":     0.0,
+            "retrieved_codes": []
+        }
+        print(f"⚠ Error for '{activity_label[:60]}...': {e}")
+
+    records.append({
+        "activity":        activity_label,
+        "true_code":       true_code,
+        "pred_code":       pred.get("nace_code"),
+        "codable":         pred.get("codable", False),
+        "confidence":      pred.get("confidence", 0.0),
+        "retrieved_codes": pred.get("retrieved_codes", []),
+    })
+
+results = pd.DataFrame(records)
+print(f"\n✓ Inference complete: {len(results)} activities processed")
+results.head()
+
+# Is the true code among the retriever's candidates?
+results["retriever_hit"] = results.apply(
+    lambda row: row["true_code"] in row["retrieved_codes"], axis=1
+)
+
+# Is the predicted code correct?
+results["pipeline_correct"] = results["pred_code"] == results["true_code"]
+
+# Did the LLM pick the right code, given that the retriever found it?
+results["llm_correct_given_retriever"] = results.apply(
+    lambda row: row["pipeline_correct"] if row["retriever_hit"] else None,
+    axis=1
+)
+
+retriever_accuracy = results["retriever_hit"].mean()
+print(f"Retriever@{RETRIEVER_LIMIT} accuracy: {retriever_accuracy:.1%}")
+print(f"  → {results['retriever_hit'].sum()} / {len(results)} correctly retrieved")
+
+retriever_success = results[results["retriever_hit"]]
+llm_accuracy = retriever_success["pipeline_correct"].mean()
+
+print(f"LLM accuracy (conditional on retriever): {llm_accuracy:.1%}")
+print(f"  → {retriever_success['pipeline_correct'].sum()} / {len(retriever_success)} correctly coded by the LLM")
+
+pipeline_accuracy = results["pipeline_correct"].mean()
+
+print(f"Pipeline accuracy (end-to-end)          : {pipeline_accuracy:.1%}")
+print(f"  → {results['pipeline_correct'].sum()} / {len(results)} correctly coded")
+print()
+print(f"Cross-check: Retriever@k × LLM = {retriever_accuracy:.3f} × {llm_accuracy:.3f} = {retriever_accuracy * llm_accuracy:.1%}")
+
+n_total          = len(results)
+n_retriever_miss = (~results["retriever_hit"]).sum()
+n_llm_miss       = (results["retriever_hit"] & ~results["pipeline_correct"]).sum()
+n_correct        = results["pipeline_correct"].sum()
+
+print(
+    "\n".join(
+        [
+            "=" * 52,
+            "      DASHBOARD — RAG PIPELINE NACE 2.1",
+            "=" * 52,
+            f"  Activities processed        : {n_total:>6}",
+            f"  Correctly coded             : {n_correct:>6}  ({pipeline_accuracy:.1%})",
+            "",
+            f"  Retriever@{RETRIEVER_LIMIT} accuracy        : {retriever_accuracy:>6.1%}",
+            f"  LLM accuracy (conditional)  : {llm_accuracy:>6.1%}",
+            f"  Pipeline accuracy           : {pipeline_accuracy:>6.1%}",
+            "",
+            f"  Retriever errors            : {n_retriever_miss:>6}  ({n_retriever_miss / n_total:.1%})",
+            f"  LLM errors                  : {n_llm_miss:>6}  ({n_llm_miss / n_total:.1%})",
+            "=" * 52,
+        ]
+    )
+)
+
+
+
+
+
+
+
